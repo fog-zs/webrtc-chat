@@ -185,19 +185,23 @@ func startLocal(localPort int, registry *MessageHandlerRegistry, dataChannel *we
 }
 
 func handleLocalProxy(conn net.Conn, registry *MessageHandlerRegistry, dataChannel *webrtc.DataChannel) {
-	defer conn.Close()
-	buf := make([]byte, 4096)
+	defer conn.Close() // TCP接続が終了したら必ずクローズする
+
+	// チャネルを使ってゴルーチンを同期
+	done := make(chan struct{})
 
 	// TCP接続からDataChannelにデータを送信
 	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				if err == io.EOF {
 					log.Println("Reached end of TCP connection")
-					return
+				} else {
+					log.Printf("TCP connection read error: %v", err)
 				}
-				log.Printf("TCP connection read error: %v", err)
 				return
 			}
 
@@ -211,14 +215,32 @@ func handleLocalProxy(conn net.Conn, registry *MessageHandlerRegistry, dataChann
 	}()
 
 	// DataChannelからTCP接続にデータを送信
-	registry.AddHandler(func(msg webrtc.DataChannelMessage) {
+	handler := func(msg webrtc.DataChannelMessage) {
 		_, err := conn.Write(msg.Data)
 		if err != nil {
 			log.Printf("Error writing to TCP connection: %v", err)
+			// エラーが発生したら接続を終了させる
+			done <- struct{}{}
 		} else {
 			log.Printf("Forwarded %d bytes from DataChannel to TCP connection", len(msg.Data))
 		}
-	})
+	}
+
+	// ハンドラーを登録
+	registry.AddHandler(handler)
+
+	// TCP接続が終了したらハンドラーを削除
+	<-done
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	// handlersから現在のhandlerを削除
+	for i, h := range registry.handlers {
+		if fmt.Sprintf("%p", h) == fmt.Sprintf("%p", handler) {
+			// スライスから削除
+			registry.handlers = append(registry.handlers[:i], registry.handlers[i+1:]...)
+			break
+		}
+	}
 }
 
 func startRemote(remotePort int, registry *MessageHandlerRegistry, dataChannel *webrtc.DataChannel) {
