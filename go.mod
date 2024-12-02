@@ -1,4 +1,4 @@
-module github.com/fog-zs/webrtc-chat
+module github.com/fog-zs/fogchat
 
 go 1.22.4
 
